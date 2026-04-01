@@ -10,7 +10,7 @@ key_name   = "o2bkids"
 
 # ─── Scaling: change worker_count and run terraform apply to add nodes ────────
 
-worker_count = 2   # → set to 3, 4, 5... to add more workers
+worker_count = 2 # → set to 3, 4, 5... to add more workers
 
 # ─── Optional overrides ──────────────────────────────────────────────────────
 
