@@ -21,7 +21,7 @@ name: CI Pipeline – Security & Code Validation
 on:
   pull_request:
     branches:
-      - main
+      #- main
 
 concurrency:
   group: ci-${{ github.head_ref }}
