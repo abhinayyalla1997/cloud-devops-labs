@@ -4,9 +4,9 @@
 # ─── Required ────────────────────────────────────────────────────────────────
 
 aws_region = "us-east-1"
-vpc_id     = "vpc-xxxxxxxxxxxxxxxxx"
-subnet_id  = "subnet-xxxxxxxxxxxxxxxxx"
-key_name   = "my-ec2-keypair"
+vpc_id     = "vpc-9bdedae1"
+subnet_id  = "subnet-24897f05"
+key_name   = "o2bkids"
 
 # ─── Scaling: change worker_count and run terraform apply to add nodes ────────
 
