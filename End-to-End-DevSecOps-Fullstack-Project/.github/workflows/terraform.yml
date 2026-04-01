@@ -1,0 +1,156 @@
+# =============================================================================
+# TERRAFORM INFRASTRUCTURE PIPELINE
+# =============================================================================
+# Triggers  : Push / PR touching terraform-k8s-kubeadm/**
+# Plan      : Runs automatically on every push / PR
+# Apply     : Requires MANUAL APPROVAL via GitHub Environment "production"
+#             → Configure: Repo Settings → Environments → production → Required Reviewers
+#
+# Required Secrets:
+#   AWS_ACCESS_KEY_ID       – IAM user with EC2 / SSM / IAM permissions
+#   AWS_SECRET_ACCESS_KEY
+#   AWS_REGION              – e.g. us-east-1
+# =============================================================================
+
+name: Terraform Infrastructure Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform-k8s-kubeadm/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'terraform-k8s-kubeadm/**'
+  workflow_dispatch:
+    inputs:
+      confirm_apply:
+        description: 'Type "apply" to confirm terraform apply'
+        required: true
+        default: ''
+
+defaults:
+  run:
+    working-directory: terraform-k8s-kubeadm
+
+# Prevent concurrent runs from conflicting on state
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 1 — Validate, Checkov Security Scan, Plan
+# Runs on every push and PR. No infrastructure is changed here.
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  validate-and-plan:
+    name: Validate & Plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # ── Format check ───────────────────────────────────────────────────────
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        # Fails if any .tf file is not properly formatted
+
+      # ── Init ───────────────────────────────────────────────────────────────
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      # ── Validate ───────────────────────────────────────────────────────────
+      - name: Terraform Validate
+        run: terraform validate
+
+      # ── Checkov IaC Security Scan ──────────────────────────────────────────
+      # Scans all Terraform files for security misconfigurations
+      # To suppress a specific rule, add to .checkov.yaml in the repo root
+      - name: Checkov IaC Security Scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory:               terraform-k8s-kubeadm
+          framework:               terraform
+          output_format:           cli
+          download_external_modules: true
+          soft_fail:               true
+          # soft_fail: true  ← change to true during initial setup to see findings without blocking
+
+      # ── Plan ───────────────────────────────────────────────────────────────
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -out=tfplan -input=false -no-color
+        env:
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
+
+      - name: Show Plan Summary
+        run: terraform show -no-color tfplan
+
+      # ── Save plan as artifact (consumed by apply job) ──────────────────────
+      - name: Save Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name:            tfplan-${{ github.sha }}
+          path:            terraform-k8s-kubeadm/tfplan
+          retention-days:  1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Apply (MANUAL APPROVAL REQUIRED)
+  # Only runs on push to main (not PRs).
+  # Gated by GitHub Environment "production" — requires a reviewer to approve.
+  #
+  # Setup:  Repo → Settings → Environments → New: "production"
+  #         → Add Required Reviewers (your GitHub username)
+  # ─────────────────────────────────────────────────────────────────────────────
+  apply:
+    name: Apply (Awaiting Manual Approval)
+    needs: validate-and-plan
+    runs-on: ubuntu-latest
+    environment: production             # ← This is the manual approval gate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Download Approved Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: terraform-k8s-kubeadm
+
+      - name: Terraform Apply
+        run: terraform apply -input=false tfplan
+        env:
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}

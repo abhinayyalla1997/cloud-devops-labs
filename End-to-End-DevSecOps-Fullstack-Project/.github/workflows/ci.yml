@@ -1,0 +1,134 @@
+# =============================================================================
+# CI PIPELINE — Security & Code Validation
+# =============================================================================
+# Trigger  : Pull Requests targeting main
+# Purpose  : Gate code quality and security BEFORE merge
+#
+# Stages (all must pass — pipeline fails if any stage fails):
+#   1. Maven Build + Test (generates compiled classes + JaCoCo coverage for Sonar)
+#   2. OWASP Dependency Check  (SCA — third-party library vulnerabilities)
+#   3. SonarQube SAST Scan     (static code analysis)
+#   4. SonarQube Quality Gate  (blocks merge if gate fails)
+#   5. Trivy File System Scan  (filesystem + dependency vuln scan)
+#
+# Required Secrets:
+#   SONAR_TOKEN      – SonarQube user token
+#   SONAR_HOST_URL   – e.g. http://<sonarqube-ec2-ip>:9000
+# =============================================================================
+
+name: CI Pipeline – Security & Code Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-validate:
+    name: Security & Code Validation
+    runs-on: ubuntu-latest
+
+    # Set default working directory for all run: steps
+    defaults:
+      run:
+        working-directory: FullStack-Blogging-App
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────
+      # fetch-depth: 0 required by SonarQube for proper blame/history analysis
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Java 17 ───────────────────────────────────────────────────────────
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version:  '17'
+          distribution:  'temurin'
+          cache:         'maven'
+
+      # ── Maven Build + Tests ───────────────────────────────────────────────
+      # Runs tests and generates JaCoCo XML coverage report.
+      # SonarQube uses the coverage data for quality gate evaluation.
+      - name: Maven Build & Test
+        run: ./mvnw clean verify -B
+        # -B = batch mode (no interactive prompts, cleaner CI output)
+
+      # ── OWASP Dependency Check (SCA) ─────────────────────────────────────
+      # Scans pom.xml dependencies against the NVD vulnerability database.
+      # Fails pipeline on CVSS score >= 7 (High / Critical).
+      - name: OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'blogging-app'
+          path:    'FullStack-Blogging-App'
+          format:  'HTML'
+          args: >
+            --failOnCVSS 7
+            --enableRetired
+            --disableAssembly
+
+      - name: Upload OWASP Report
+        uses: actions/upload-artifact@v4
+        if: always()          # always upload so we can review even on failure
+        with:
+          name:            owasp-dependency-report
+          path:            reports/dependency-check-report.html
+          retention-days:  7
+
+      # ── SonarQube SAST Scan ───────────────────────────────────────────────
+      # Static analysis of Java source code.
+      # Requires compiled classes (produced above by Maven).
+      - name: SonarQube SAST Scan
+        uses: SonarSource/sonarqube-scan-action@v4
+        with:
+          projectBaseDir: FullStack-Blogging-App
+          args: >
+            -Dsonar.projectKey=blogging-app
+            -Dsonar.projectName=blogging-app
+            -Dsonar.java.binaries=target/classes
+            -Dsonar.sources=src/main/java
+            -Dsonar.tests=src/test/java
+            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+        env:
+          SONAR_TOKEN:    ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      # ── SonarQube Quality Gate ────────────────────────────────────────────
+      # Reads the scan result and fails the pipeline if Quality Gate is RED.
+      # Quality Gate criteria are configured in SonarQube UI.
+      - name: SonarQube Quality Gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1.1.0
+        timeout-minutes: 5
+        with:
+          scanMetadataReportFile: FullStack-Blogging-App/.scannerwork/report-task.txt
+        env:
+          SONAR_TOKEN:    ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      # ── Trivy File System Scan ────────────────────────────────────────────
+      # Scans the source tree for vulnerabilities in dependencies and configs.
+      # exit-code: 1 → fails pipeline on CRITICAL or HIGH findings.
+      - name: Trivy File System Scan
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type:      fs
+          scan-ref:       FullStack-Blogging-App
+          format:         table
+          severity:       CRITICAL,HIGH
+          exit-code:      '1'
+          ignore-unfixed: true
+
+      - name: Upload Trivy FS Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name:           trivy-fs-report
+          path:           trivy-fs-results.txt
+          retention-days: 7

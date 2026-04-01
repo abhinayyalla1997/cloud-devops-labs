@@ -1,0 +1,212 @@
+# =============================================================================
+# CD PIPELINE — Build, Scan, Push & Deploy
+# =============================================================================
+# Trigger  : Push to main branch (after PR is merged)
+# Purpose  : Build the Docker image, scan it, push to ECR, deploy to kubeadm
+#
+# Stages:
+#   Job 1 — build-and-push:
+#     1. Maven Build        (skip tests — already validated in CI)
+#     2. Docker Build       (eclipse-temurin:17-jdk-alpine)
+#     3. Trivy Image Scan   (gate: blocks push if CRITICAL CVEs found)
+#     4. Push to Amazon ECR (tagged with commit SHA + latest)
+#
+#   Job 2 — deploy (needs: build-and-push):
+#     5. Configure kubectl  (kubeconfig from GitHub Secret)
+#     6. Refresh ECR pull secret (regcred) on kubeadm cluster
+#     7. Update image in deployment-service.yml to ECR image
+#     8. kubectl apply
+#     9. kubectl rollout status
+#
+# Required Secrets:
+#   AWS_ACCESS_KEY_ID       – IAM user with ECR push + SSM read permissions
+#   AWS_SECRET_ACCESS_KEY
+#   AWS_REGION              – e.g. us-east-1
+#   ECR_REGISTRY            – e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com
+#   ECR_REPOSITORY          – e.g. blogging-app
+#   KUBE_CONFIG             – base64-encoded kubeconfig from master node
+#                             Generate: cat ~/.kube/config | base64 -w 0
+# =============================================================================
+
+name: CD Pipeline – Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false   # Never cancel a running deploy
+
+env:
+  AWS_REGION:      ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY:    ${{ secrets.ECR_REGISTRY }}
+  ECR_REPOSITORY:  ${{ secrets.ECR_REPOSITORY }}
+  IMAGE_TAG:       ${{ github.sha }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 1 — Maven Build → Docker Build → Trivy Image Scan → Push to ECR
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  build-and-push:
+    name: Build → Trivy Scan → Push to ECR
+    runs-on: ubuntu-latest
+
+    outputs:
+      image: ${{ steps.image-meta.outputs.image }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # ── Java 17 ───────────────────────────────────────────────────────────
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version:  '17'
+          distribution:  'temurin'
+          cache:         'maven'
+
+      # ── Maven Build ───────────────────────────────────────────────────────
+      # Tests are skipped — they were validated in the CI pipeline on PR.
+      - name: Maven Build
+        working-directory: FullStack-Blogging-App
+        run: ./mvnw clean package -DskipTests -B
+
+      # ── Docker Build ─────────────────────────────────────────────────────
+      - name: Docker Build
+        working-directory: FullStack-Blogging-App
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
+
+      # ── Trivy Image Scan ─────────────────────────────────────────────────
+      # Scans the locally built Docker image BEFORE pushing to ECR.
+      # Pipeline fails on CRITICAL vulnerabilities — image is NOT pushed.
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref:      '${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}'
+          scan-type:      image
+          format:         table
+          severity:       CRITICAL
+          exit-code:      '1'
+          ignore-unfixed: true
+
+      - name: Upload Trivy Image Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name:           trivy-image-report-${{ github.sha }}
+          path:           trivy-image-results.txt
+          retention-days: 7
+
+      # ── AWS Credentials (only after scan passes) ──────────────────────────
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # ── Login to Amazon ECR ───────────────────────────────────────────────
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Push Image to ECR ─────────────────────────────────────────────────
+      # Push both the commit SHA tag (immutable, traceable) and latest tag.
+      - name: Push Image to Amazon ECR
+        id: image-meta
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Deploy to Kubernetes (kubeadm on EC2)
+  # Depends on job 1 passing. Uses kubeconfig stored as GitHub Secret.
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Kubernetes (kubeadm)
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # ── kubectl ───────────────────────────────────────────────────────────
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+
+      # ── AWS Credentials (needed for ECR pull secret refresh) ──────────────
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # ── kubeconfig ────────────────────────────────────────────────────────
+      # KUBE_CONFIG secret = base64 of ~/.kube/config from master node.
+      # Generate: cat ~/.kube/config | base64 -w 0
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 --decode > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl cluster-info
+
+      # ── ECR Pull Secret ───────────────────────────────────────────────────
+      # Creates/refreshes the "regcred" secret in the default namespace.
+      # This matches the imagePullSecrets.name in deployment-service.yml.
+      # ECR tokens expire every 12h — this step always refreshes them.
+      - name: Create / Refresh ECR Pull Secret (regcred)
+        run: |
+          ECR_PASSWORD=$(aws ecr get-login-password --region $AWS_REGION)
+          kubectl create secret docker-registry regcred \
+            --docker-server=$ECR_REGISTRY \
+            --docker-username=AWS \
+            --docker-password=$ECR_PASSWORD \
+            --namespace=default \
+            --save-config \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # ── Update Image in Manifest ──────────────────────────────────────────
+      # Substitutes the image reference in deployment-service.yml with the
+      # ECR image tagged with this commit SHA. Does not permanently modify the
+      # file — changes exist only in this runner's workspace.
+      - name: Substitute Image in deployment-service.yml
+        run: |
+          FULL_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          sed -i "s|image:.*|image: $FULL_IMAGE|g" \
+            FullStack-Blogging-App/deployment-service.yml
+          echo "Deploying image: $FULL_IMAGE"
+          grep "image:" FullStack-Blogging-App/deployment-service.yml
+
+      # ── Deploy ────────────────────────────────────────────────────────────
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -f FullStack-Blogging-App/deployment-service.yml
+
+      # ── Rollout Status ────────────────────────────────────────────────────
+      # Waits for the deployment to reach desired state.
+      # Fails the pipeline if rollout does not complete within 3 minutes.
+      - name: Wait for Rollout
+        run: |
+          kubectl rollout status deployment/bloggingapp-deployment \
+            --namespace=default \
+            --timeout=3m
+
+      # ── Verify ───────────────────────────────────────────────────────────
+      - name: Verify Deployment
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -l app=bloggingapp -o wide
+          echo ""
+          echo "=== Service ==="
+          kubectl get svc bloggingapp-ssvc
