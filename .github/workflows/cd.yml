@@ -33,7 +33,7 @@ name: CD Pipeline – Build & Deploy
 on:
   push:
     branches:
-     # - main
+      - main
 
 concurrency:
   group: cd-${{ github.ref }}
