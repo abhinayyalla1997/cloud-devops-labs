@@ -1,15 +1,27 @@
 # =============================================================================
 # TERRAFORM INFRASTRUCTURE PIPELINE
 # =============================================================================
-# Triggers  : Push / PR touching terraform-k8s-kubeadm/**
-# Plan      : Runs automatically on every push / PR
-# Apply     : Requires MANUAL APPROVAL via GitHub Environment "production"
-#             → Configure: Repo Settings → Environments → production → Required Reviewers
+# Triggers:
+#   push / PR  → terraform-k8s-kubeadm/**  (validate + plan only, no changes)
+#   workflow_dispatch → choose action: apply | destroy
+#
+# Jobs:
+#   validate-and-scan  always runs  fmt → init → validate → checkov → plan
+#   apply              manual only  init → plan → apply      (environment gate)
+#   destroy            manual only  init → destroy            (environment gate)
+#
+# Remote State:
+#   S3 bucket : cicd-test-13102022
+#   State key : terraform-k8s-kubeadm/terraform.tfstate
+#   Both apply and destroy connect to the same state — no artifacts needed.
+#
+# Manual Approval Gate (both apply + destroy):
+#   Repo → Settings → Environments → "production" → Required Reviewers
 #
 # Required Secrets:
-#   AWS_ACCESS_KEY_ID       – IAM user with EC2 / SSM / IAM permissions
+#   AWS_ACCESS_KEY_ID       IAM user with EC2 / SSM / IAM / S3 permissions
 #   AWS_SECRET_ACCESS_KEY
-#   AWS_REGION              – e.g. us-east-1
+#   AWS_REGION              e.g. us-east-1
 # =============================================================================
 
 name: Terraform Infrastructure Pipeline
@@ -20,35 +32,44 @@ on:
       - main
     paths:
       - 'terraform-k8s-kubeadm/**'
+
   pull_request:
     branches:
       - main
     paths:
       - 'terraform-k8s-kubeadm/**'
+
   workflow_dispatch:
     inputs:
-      confirm_apply:
-        description: 'Type "apply" to confirm terraform apply'
+      action:
+        description: 'Terraform action to run'
         required: true
-        default: ''
+        type: choice
+        options:
+          - apply
+          - destroy
+
+# Prevent two runs from touching S3 state simultaneously
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
 
 defaults:
   run:
     working-directory: terraform-k8s-kubeadm
 
-# Prevent concurrent runs from conflicting on state
-concurrency:
-  group: terraform-${{ github.ref }}
-  cancel-in-progress: false
-
 # ─────────────────────────────────────────────────────────────────────────────
-# JOB 1 — Validate, Checkov Security Scan, Plan
-# Runs on every push and PR. No infrastructure is changed here.
+# JOB 1 ── Validate & Scan
+# Runs on every trigger. Never modifies infrastructure.
+# Initialises Terraform with the S3 remote backend so validate and plan
+# can run against real provider schemas.
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
-  validate-and-plan:
-    name: Validate & Plan
+  validate-and-scan:
+    name: Validate & Security Scan
     runs-on: ubuntu-latest
+    env:
+      TF_IN_AUTOMATION: "true"   # cleaner Terraform output in CI
 
     steps:
       - name: Checkout Code
@@ -66,64 +87,63 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ secrets.AWS_REGION }}
 
-      # ── Format check ───────────────────────────────────────────────────────
+      # ── Format Check ─────────────────────────────────────────────────────
+      # Fails immediately if any .tf file is not properly formatted.
+      # Run `terraform fmt -recursive` locally to fix before pushing.
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
-        # Fails if any .tf file is not properly formatted
 
-      # ── Init ───────────────────────────────────────────────────────────────
+      # ── Init with S3 Remote Backend ──────────────────────────────────────
+      # Region is passed via -backend-config because the backend block in
+      # main.tf intentionally omits it (backend blocks don't support variables).
       - name: Terraform Init
-        run: terraform init -input=false
+        run: |
+          terraform init \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -input=false
 
-      # ── Validate ───────────────────────────────────────────────────────────
+      # ── Validate ─────────────────────────────────────────────────────────
       - name: Terraform Validate
         run: terraform validate
 
-      # ── Checkov IaC Security Scan ──────────────────────────────────────────
-      # Scans all Terraform files for security misconfigurations
-      # To suppress a specific rule, add to .checkov.yaml in the repo root
+      # ── Checkov IaC Security Scan ────────────────────────────────────────
+      # Scans all .tf files for security misconfigurations.
+      # Add a .checkov.yaml to suppress specific rules if needed.
       - name: Checkov IaC Security Scan
         uses: bridgecrewio/checkov-action@v12
         with:
-          directory:               terraform-k8s-kubeadm
-          framework:               terraform
-          output_format:           cli
+          directory:                 terraform-k8s-kubeadm
+          framework:                 terraform
+          output_format:             cli
           download_external_modules: true
-          soft_fail:               true
-          # soft_fail: true  ← change to true during initial setup to see findings without blocking
+          soft_fail:                 true
+          # Set soft_fail: false to enforce security gate in production
 
-      # ── Plan ───────────────────────────────────────────────────────────────
+      # ── Terraform Plan ───────────────────────────────────────────────────
+      # Runs plan on push/PR and for apply dispatch.
+      # Skipped for destroy dispatch (plan output is not meaningful for teardown).
       - name: Terraform Plan
-        id: plan
-        run: terraform plan -out=tfplan -input=false -no-color
+        if: github.event.inputs.action != 'destroy'
+        run: |
+          terraform plan -input=false -no-color
         env:
           TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
 
-      - name: Show Plan Summary
-        run: terraform show -no-color tfplan
-
-      # ── Save plan as artifact (consumed by apply job) ──────────────────────
-      - name: Save Plan Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name:            tfplan-${{ github.sha }}
-          path:            terraform-k8s-kubeadm/tfplan
-          retention-days:  1
-
   # ─────────────────────────────────────────────────────────────────────────────
-  # JOB 2 — Apply (MANUAL APPROVAL REQUIRED)
-  # Only runs on push to main (not PRs).
-  # Gated by GitHub Environment "production" — requires a reviewer to approve.
-  #
-  # Setup:  Repo → Settings → Environments → New: "production"
-  #         → Add Required Reviewers (your GitHub username)
+  # JOB 2 ── Apply  (workflow_dispatch → action: apply only)
+  # Gated by GitHub Environment "production" — a reviewer must approve.
+  # Reads and writes remote state from S3 directly; no plan artifact needed.
   # ─────────────────────────────────────────────────────────────────────────────
   apply:
-    name: Apply (Awaiting Manual Approval)
-    needs: validate-and-plan
+    name: Terraform Apply
+    needs: validate-and-scan
     runs-on: ubuntu-latest
-    environment: production             # ← This is the manual approval gate
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production          # ← manual approval gate
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.action == 'apply'
+    env:
+      TF_IN_AUTOMATION: "true"
 
     steps:
       - name: Checkout Code
@@ -141,16 +161,74 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ secrets.AWS_REGION }}
 
+      # Init re-connects to the same S3 remote state used by all other runs
       - name: Terraform Init
-        run: terraform init -input=false
+        run: |
+          terraform init \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -input=false
 
-      - name: Download Approved Plan
-        uses: actions/download-artifact@v4
-        with:
-          name: tfplan-${{ github.sha }}
-          path: terraform-k8s-kubeadm
+      # Fresh plan executed immediately before apply — atomic within this job.
+      # The environment approval gate ensures a human reviewed before this runs.
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -out=tfplan \
+            -input=false \
+            -no-color
+        env:
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
 
       - name: Terraform Apply
         run: terraform apply -input=false tfplan
+        env:
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 3 ── Destroy  (workflow_dispatch → action: destroy only)
+  # Also gated by environment "production" approval.
+  # Connects to the same S3 remote state so it knows exactly what to destroy.
+  # ─────────────────────────────────────────────────────────────────────────────
+  destroy:
+    name: Terraform Destroy
+    needs: validate-and-scan
+    runs-on: ubuntu-latest
+    environment: production          # ← same manual approval gate
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.action == 'destroy'
+    env:
+      TF_IN_AUTOMATION: "true"
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # Init reads the same S3 remote state that apply wrote —
+      # Terraform knows exactly which resources to destroy.
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -input=false
+
+      - name: Terraform Destroy
+        run: |
+          terraform destroy \
+            -auto-approve \
+            -input=false \
+            -no-color
         env:
           TF_VAR_aws_region: ${{ secrets.AWS_REGION }}

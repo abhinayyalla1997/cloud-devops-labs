@@ -6,6 +6,21 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  # ── Remote State: S3 Backend ──────────────────────────────────────────────
+  # State file is stored in S3 so every pipeline run (apply / destroy)
+  # reads and writes the same state — no local state, no artifacts.
+  #
+  # `region` is intentionally omitted here; it is passed at runtime via:
+  #   terraform init -backend-config="region=<AWS_REGION>"
+  #
+  # Production recommendation: add a DynamoDB table for state locking:
+  #   dynamodb_table = "terraform-state-lock"
+  backend "s3" {
+    bucket  = "cicd-test-13102022"
+    key     = "terraform-k8s-kubeadm/terraform.tfstate"
+    encrypt = true
+  }
 }
 
 provider "aws" {
