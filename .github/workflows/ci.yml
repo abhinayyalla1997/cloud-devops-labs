@@ -64,6 +64,7 @@ jobs:
       # Scans pom.xml dependencies against the NVD vulnerability database.
       # Fails pipeline on CVSS score >= 7 (High / Critical).
       - name: OWASP Dependency Check
+        working-directory: ${{ github.workspace }}
         run: |
           VERSION=$(curl -s https://jeremylong.github.io/DependencyCheck/current.txt)
           curl -sL "https://github.com/jeremylong/DependencyCheck/releases/download/v${VERSION}/dependency-check-${VERSION}-release.zip" \
