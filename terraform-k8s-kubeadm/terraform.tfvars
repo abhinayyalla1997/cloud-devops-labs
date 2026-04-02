@@ -14,7 +14,7 @@ worker_count = 2 # → set to 3, 4, 5... to add more workers
 
 # ─── Optional overrides ──────────────────────────────────────────────────────
 
-cluster_name         = "k8s-kubeadm"
+cluster_name         = "k8s-kubeadm-cluster"
 environment          = "dev"
 master_instance_type = "t3.medium"
 worker_instance_type = "t3.medium"
