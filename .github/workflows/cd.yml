@@ -33,7 +33,7 @@ name: CD Pipeline – Build & Deploy
 on:
   push:
     branches:
-     # - main
+      - main
 
 concurrency:
   group: cd-${{ github.ref }}
@@ -71,12 +71,12 @@ jobs:
       # ── Maven Build ───────────────────────────────────────────────────────
       # Tests are skipped — they were validated in the CI pipeline on PR.
       - name: Maven Build
-        working-directory: FullStack-Blogging-App
-        run: ./mvnw clean package -DskipTests -B
+        working-directory: End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App
+        run: mvn clean package -DskipTests -B
 
       # ── Docker Build ─────────────────────────────────────────────────────
       - name: Docker Build
-        working-directory: FullStack-Blogging-App
+        working-directory: End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App
         run: |
           docker build \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
@@ -184,14 +184,14 @@ jobs:
         run: |
           FULL_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           sed -i "s|image:.*|image: $FULL_IMAGE|g" \
-            FullStack-Blogging-App/deployment-service.yml
+            End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App/deployment-service.yml
           echo "Deploying image: $FULL_IMAGE"
-          grep "image:" FullStack-Blogging-App/deployment-service.yml
+          grep "image:" End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App/deployment-service.yml
 
       # ── Deploy ────────────────────────────────────────────────────────────
       - name: Deploy to Kubernetes
         run: |
-          kubectl apply -f FullStack-Blogging-App/deployment-service.yml
+          kubectl apply -f End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App/deployment-service.yml
 
       # ── Rollout Status ────────────────────────────────────────────────────
       # Waits for the deployment to reach desired state.
