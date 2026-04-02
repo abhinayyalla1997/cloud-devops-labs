@@ -116,7 +116,7 @@ jobs:
       # Scans the source tree for vulnerabilities in dependencies and configs.
       # exit-code: 1 → fails pipeline on CRITICAL or HIGH findings.
       - name: Trivy File System Scan
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type:      fs
           scan-ref:       FullStack-Blogging-App
