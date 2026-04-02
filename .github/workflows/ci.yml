@@ -35,7 +35,7 @@ jobs:
     # Set default working directory for all run: steps
     defaults:
       run:
-        working-directory: FullStack-Blogging-App
+        working-directory: End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App
 
     steps:
       # ── Checkout ─────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ jobs:
         uses: dependency-check/Dependency-Check_Action@main
         with:
           project: 'blogging-app'
-          path:    'FullStack-Blogging-App'
+          path:    'End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App'
           format:  'HTML'
           args: >
             --failOnCVSS 7
@@ -88,7 +88,7 @@ jobs:
       - name: SonarQube SAST Scan
         uses: SonarSource/sonarqube-scan-action@v4
         with:
-          projectBaseDir: FullStack-Blogging-App
+          projectBaseDir: End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App
           args: >
             -Dsonar.projectKey=blogging-app
             -Dsonar.projectName=blogging-app
@@ -107,7 +107,7 @@ jobs:
         uses: SonarSource/sonarqube-quality-gate-action@v1.1.0
         timeout-minutes: 5
         with:
-          scanMetadataReportFile: FullStack-Blogging-App/.scannerwork/report-task.txt
+          scanMetadataReportFile: End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App/.scannerwork/report-task.txt
         env:
           SONAR_TOKEN:    ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
@@ -119,7 +119,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           scan-type:      fs
-          scan-ref:       FullStack-Blogging-App
+          scan-ref:       End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App
           format:         table
           severity:       CRITICAL,HIGH
           exit-code:      '1'
