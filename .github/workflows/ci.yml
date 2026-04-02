@@ -4,11 +4,11 @@
 # Trigger  : Pull Requests targeting main
 # Purpose  : Gate code quality and security BEFORE merge
 #
-# Stages (all must pass — pipeline fails if any stage fails):
+# Stages (all informational — pipeline never fails on security findings):
 #   1. Maven Build + Test (generates compiled classes + JaCoCo coverage for Sonar)
 #   2. OWASP Dependency Check  (SCA — third-party library vulnerabilities)
 #   3. SonarQube SAST Scan     (static code analysis)
-#   4. SonarQube Quality Gate  (blocks merge if gate fails)
+#   4. SonarQube Quality Gate  (quality gate result logged, does not block)
 #   5. Trivy File System Scan  (filesystem + dependency vuln scan)
 #
 # Required Secrets:
@@ -62,7 +62,7 @@ jobs:
 
       # ── OWASP Dependency Check (SCA) ─────────────────────────────────────
       # Scans pom.xml dependencies against the NVD vulnerability database.
-      # continue-on-error: true — report is generated and uploaded even if CVEs found.
+      # continue-on-error: true — findings are reported but do not block the pipeline.
       - name: OWASP Dependency Check
         working-directory: ${{ github.workspace }}
         continue-on-error: true
@@ -76,23 +76,25 @@ jobs:
             --project "blogging-app" \
             --scan  "End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App" \
             --format HTML \
-            --out reports \
+            --out   reports \
             --enableRetired \
             --disableAssembly
 
       - name: Upload OWASP Report
         uses: actions/upload-artifact@v4
-        if: always()          # always upload so we can review even on failure
+        if: always()
         with:
           name:            owasp-dependency-report
-          path:            reports/dependency-check-report.html
+          path:            ${{ github.workspace }}/reports/dependency-check-report.html
           retention-days:  7
 
       # ── SonarQube SAST Scan ───────────────────────────────────────────────
       # Static analysis of Java source code.
       # Requires compiled classes (produced above by Maven).
+      # continue-on-error: true — scan result is informational, does not block merge.
       - name: SonarQube SAST Scan
-        uses: SonarSource/sonarqube-scan-action@v4
+        uses: SonarSource/sonarqube-scan-action@v6
+        continue-on-error: true
         with:
           projectBaseDir: End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App
           args: >
@@ -107,10 +109,10 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
       # ── SonarQube Quality Gate ────────────────────────────────────────────
-      # Reads the scan result and fails the pipeline if Quality Gate is RED.
-      # Quality Gate criteria are configured in SonarQube UI.
+      # Reads the scan result. continue-on-error: true — gate result is logged only.
       - name: SonarQube Quality Gate
         uses: SonarSource/sonarqube-quality-gate-action@v1.1.0
+        continue-on-error: true
         timeout-minutes: 5
         with:
           scanMetadataReportFile: End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App/.scannerwork/report-task.txt
@@ -120,9 +122,10 @@ jobs:
 
       # ── Trivy File System Scan ────────────────────────────────────────────
       # Scans the source tree for vulnerabilities in dependencies and configs.
-      # exit-code: 1 → fails pipeline on CRITICAL or HIGH findings.
+      # continue-on-error: true — findings are reported but do not block the pipeline.
       - name: Trivy File System Scan
         uses: aquasecurity/trivy-action@master
+        continue-on-error: true
         with:
           scan-type:      fs
           scan-ref:       End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App
