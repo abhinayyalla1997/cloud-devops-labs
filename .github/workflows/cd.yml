@@ -87,7 +87,7 @@ jobs:
       # Scans the locally built Docker image BEFORE pushing to ECR.
       # Pipeline fails on CRITICAL vulnerabilities — image is NOT pushed.
       - name: Trivy Image Scan
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref:      '${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}'
           scan-type:      image
