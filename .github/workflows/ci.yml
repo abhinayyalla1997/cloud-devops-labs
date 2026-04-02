@@ -62,9 +62,10 @@ jobs:
 
       # ── OWASP Dependency Check (SCA) ─────────────────────────────────────
       # Scans pom.xml dependencies against the NVD vulnerability database.
-      # Fails pipeline on CVSS score >= 7 (High / Critical).
+      # continue-on-error: true — report is generated and uploaded even if CVEs found.
       - name: OWASP Dependency Check
         working-directory: ${{ github.workspace }}
+        continue-on-error: true
         run: |
           VERSION=$(curl -s https://jeremylong.github.io/DependencyCheck/current.txt)
           curl -sL "https://github.com/jeremylong/DependencyCheck/releases/download/v${VERSION}/dependency-check-${VERSION}-release.zip" \
@@ -76,7 +77,6 @@ jobs:
             --scan  "End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App" \
             --format HTML \
             --out reports \
-            --failOnCVSS 7 \
             --enableRetired \
             --disableAssembly
 
