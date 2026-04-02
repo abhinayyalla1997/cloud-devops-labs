@@ -73,6 +73,8 @@ jobs:
             --failOnCVSS 7
             --enableRetired
             --disableAssembly
+        env:
+          JAVA_HOME: ""   # container has its own JRE; host path is invalid inside Docker
 
       - name: Upload OWASP Report
         uses: actions/upload-artifact@v4
