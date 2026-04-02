@@ -56,10 +56,8 @@ jobs:
       # ── Maven Build + Tests ───────────────────────────────────────────────
       # Runs tests and generates JaCoCo XML coverage report.
       # SonarQube uses the coverage data for quality gate evaluation.
-      - name: Make mvnw executable
-        run: chmod +x mvnw
       - name: Maven Build & Test
-        run: ./mvnw clean verify -B
+        run: mvn clean verify -B
         # -B = batch mode (no interactive prompts, cleaner CI output)
 
       # ── OWASP Dependency Check (SCA) ─────────────────────────────────────
