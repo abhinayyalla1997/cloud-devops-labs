@@ -64,17 +64,20 @@ jobs:
       # Scans pom.xml dependencies against the NVD vulnerability database.
       # Fails pipeline on CVSS score >= 7 (High / Critical).
       - name: OWASP Dependency Check
-        uses: dependency-check/Dependency-Check_Action@main
-        with:
-          project: 'blogging-app'
-          path:    'End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App'
-          format:  'HTML'
-          args: >
-            --failOnCVSS 7
-            --enableRetired
+        run: |
+          VERSION=$(curl -s https://jeremylong.github.io/DependencyCheck/current.txt)
+          curl -sL "https://github.com/jeremylong/DependencyCheck/releases/download/v${VERSION}/dependency-check-${VERSION}-release.zip" \
+            --output dependency-check.zip
+          unzip -q dependency-check.zip
+          mkdir -p reports
+          ./dependency-check/bin/dependency-check.sh \
+            --project "blogging-app" \
+            --scan  "End-to-End-DevSecOps-Fullstack-Project/FullStack-Blogging-App" \
+            --format HTML \
+            --out reports \
+            --failOnCVSS 7 \
+            --enableRetired \
             --disableAssembly
-        env:
-          JAVA_HOME: /opt/java/openjdk   # Eclipse Temurin path inside the OWASP DC container
 
       - name: Upload OWASP Report
         uses: actions/upload-artifact@v4
